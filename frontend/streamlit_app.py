@@ -28,6 +28,7 @@ REQUEST_TIMEOUT_SECONDS = 30.0
 def request_api(
     method: str,
     path: str,
+    allow_not_found: bool = False,
     **kwargs: Any,
 ) -> Any:
     """
@@ -45,6 +46,8 @@ def request_api(
             timeout=REQUEST_TIMEOUT_SECONDS,
             **kwargs,
         )
+        if allow_not_found and response.status_code == 404:
+            return None
         response.raise_for_status()
 
     except httpx.ConnectError as exc:
@@ -91,6 +94,7 @@ def initialize_page_state() -> None:
         "session_status": None,
         "last_action": None,
         "requires_human": False,
+        "ticket": None,
         "last_error": None,
     }
 
@@ -106,6 +110,7 @@ def reset_page_state() -> None:
     st.session_state.session_status = None
     st.session_state.last_action = None
     st.session_state.requires_human = False
+    st.session_state.ticket = None
     st.session_state.last_error = None
 
 
@@ -148,6 +153,11 @@ def load_existing_session(session_id: str) -> None:
         "GET",
         f"/sessions/{normalized_session_id}/messages",
     )
+    ticket = request_api(
+        "GET",
+        f"/sessions/{normalized_session_id}/ticket",
+        allow_not_found=True,
+    )
 
     st.session_state.session_id = session["session_id"]
     st.session_state.session_status = session["status"]
@@ -162,7 +172,20 @@ def load_existing_session(session_id: str) -> None:
     st.session_state.requires_human = (
         session["status"] == "waiting_for_human"
     )
+    st.session_state.ticket = ticket
     st.session_state.last_error = None
+
+
+def refresh_ticket() -> None:
+    """从后端刷新当前会话的人工工单状态。"""
+    session_id = st.session_state.session_id
+    if session_id is None:
+        raise RuntimeError("请先创建或加载一个会话。")
+    st.session_state.ticket = request_api(
+        "GET",
+        f"/sessions/{session_id}/ticket",
+        allow_not_found=True,
+    )
 
 
 def run_agent_turn(message: str) -> None:
@@ -204,6 +227,7 @@ def run_agent_turn(message: str) -> None:
     st.session_state.requires_human = result[
         "requires_human"
     ]
+    st.session_state.ticket = result.get("ticket")
     st.session_state.last_error = None
 
 
@@ -287,6 +311,18 @@ with st.sidebar:
 
         if st.session_state.requires_human:
             st.warning("该会话正在等待人工客服处理。")
+
+        if st.session_state.ticket:
+            ticket = st.session_state.ticket
+            st.write("工单编号：", ticket["ticket_id"])
+            st.write("工单状态：", ticket["status"])
+
+        if st.button("刷新工单状态", use_container_width=True):
+            try:
+                refresh_ticket()
+                st.rerun()
+            except RuntimeError as exc:
+                st.error(str(exc))
     else:
         st.info("请先创建或加载一个会话。")
 

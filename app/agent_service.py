@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from app.database import (
+    get_or_create_ticket,
     get_session_by_id,
     insert_message,
     update_session,
@@ -18,6 +19,7 @@ from app.schemas import (
     AgentRunResponse,
     OrderResponse,
     SessionStatus,
+    TicketResponse,
 )
 from app.services import (
     get_missing_fields,
@@ -129,31 +131,8 @@ def run_agent(
             requires_human=False,
         )
 
-    # 分支二：退款、投诉或敏感信息相关操作进入人工处理。
-    if requires_human_review(
-        candidate_session.get("problem_type"),
-        candidate_session.get("description"),
-    ):
-        reply = "该请求需要人工客服确认，已为您转入人工处理队列。"
-        updated_session = _persist_agent_result(
-            session_id,
-            {
-                **extracted_updates,
-                "status": SessionStatus.WAITING_FOR_HUMAN.value,
-            },
-            reply,
-            db_path,
-        )
-        return AgentRunResponse(
-            session_id=session_id,
-            reply=reply,
-            action=AgentAction.HANDOFF_TO_HUMAN,
-            session_status=updated_session["status"],
-            missing_fields=[],
-            requires_human=True,
-        )
-
-    # 分支三：普通问题调用受控订单查询工具。
+    # 信息完整后先验证订单。高风险请求同样不能绕过订单校验，
+    # 否则伪造或输错的订单号也会制造无效人工工单。
     order = query_order_tool(
         candidate_session["order_id"],
         db_path,
@@ -181,6 +160,42 @@ def run_agent(
             requires_human=False,
         )
 
+    # 分支二：有效订单的退款、投诉或敏感操作创建人工工单。
+    if requires_human_review(
+        candidate_session.get("problem_type"),
+        candidate_session.get("description"),
+    ):
+        ticket = get_or_create_ticket(
+            session_id=session_id,
+            order_id=candidate_session["order_id"],
+            problem_type=candidate_session["problem_type"],
+            description=candidate_session["description"],
+            db_path=db_path,
+        )
+        reply = (
+            "该请求需要人工客服确认，已创建工单 "
+            f"#{ticket['ticket_id']}，您可以随时查询处理进度。"
+        )
+        updated_session = _persist_agent_result(
+            session_id,
+            {
+                **extracted_updates,
+                "status": SessionStatus.WAITING_FOR_HUMAN.value,
+            },
+            reply,
+            db_path,
+        )
+        return AgentRunResponse(
+            session_id=session_id,
+            reply=reply,
+            action=AgentAction.HANDOFF_TO_HUMAN,
+            session_status=updated_session["status"],
+            missing_fields=[],
+            requires_human=True,
+            ticket=TicketResponse.model_validate(ticket),
+        )
+
+    # 分支三：普通问题返回前面已验证过的订单结果。
     reply = (
         f"已查询到订单 {order['order_id']}："
         f"商品为{order['product']}，当前状态为 {order['status']}。"

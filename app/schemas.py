@@ -85,6 +85,15 @@ class ProblemType(str, Enum):
     OTHER = "other"
 
 
+class TicketStatus(str, Enum):
+    """人工工单状态；状态转换规则由 ticket_service.py 统一控制。"""
+
+    PENDING_REVIEW = "pending_review"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    RESOLVED = "resolved"
+
+
 class SessionCreate(BaseModel):
     """
     创建客服会话的请求模型。
@@ -208,3 +217,23 @@ class AgentRunResponse(BaseModel):
     missing_fields: list[str]
     requires_human: bool
     order: OrderResponse | None = None
+    ticket: "TicketResponse | None" = None
+
+
+class TicketStatusUpdate(BaseModel):
+    """人工客服更新工单状态时提交的请求体。"""
+
+    status: TicketStatus
+
+
+class TicketResponse(BaseModel):
+    """工单对外响应；不暴露数据库内部实现。"""
+
+    ticket_id: int
+    session_id: str
+    order_id: str
+    problem_type: str
+    description: str
+    status: TicketStatus
+    created_at: str
+    updated_at: str
