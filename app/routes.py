@@ -49,6 +49,7 @@ from app.agent_service import (
     AgentSessionNotFoundError,
     run_agent,
 )
+from app.extraction import InformationExtractor
 from app.schemas import (
     AgentRunRequest,
     AgentRunResponse,
@@ -80,6 +81,13 @@ def get_database_path(request: Request) -> FilePath:
     不会修改开发环境中的真实数据。
     """
     return request.app.state.database_path
+
+
+def get_information_extractor(
+    request: Request,
+) -> InformationExtractor:
+    """从应用状态获取当前环境配置的信息提取器。"""
+    return request.app.state.information_extractor
 
 
 def database_unavailable(
@@ -409,6 +417,10 @@ def run_customer_service_agent(
         FilePath,
         Depends(get_database_path),
     ],
+    extractor: Annotated[
+        InformationExtractor,
+        Depends(get_information_extractor),
+    ],
 ) -> AgentRunResponse:
     """执行一轮带状态的售后客服 Agent。"""
     try:
@@ -416,6 +428,7 @@ def run_customer_service_agent(
             session_id=session_id,
             message=payload.message,
             db_path=db_path,
+            extractor=extractor,
         )
     except AgentSessionNotFoundError as exc:
         raise HTTPException(
