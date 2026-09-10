@@ -27,7 +27,7 @@ SessionUpdate：只修改已有资源的一部分。
 from enum import Enum
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class HealthResponse(BaseModel):
@@ -157,3 +157,54 @@ class MessageResponse(BaseModel):
     role: str
     content: str
     created_at: str
+
+
+# ==================== Agent 工作流新增 ====================
+
+
+class AgentAction(str, Enum):
+    """一轮 Agent 执行后选择的业务动作。"""
+
+    ASK_USER = "ask_user"
+    QUERY_ORDER = "query_order"
+    HANDOFF_TO_HUMAN = "handoff_to_human"
+
+
+class AgentRunRequest(BaseModel):
+    """执行一轮客服 Agent 时，客户端只需要发送用户原话。"""
+
+    message: str = Field(max_length=4000)
+
+    @field_validator("message")
+    @classmethod
+    def message_must_not_be_blank(cls, value: str) -> str:
+        """Pydantic 的 min_length 会把空格算作字符，因此在这里再 strip。"""
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("消息内容不能为空")
+        return normalized
+
+
+class ExtractedCustomerInfo(BaseModel):
+    """
+    从用户自然语言中提取出的结构化字段。
+
+    以后接入 LLM 时，模型也必须输出这个结构，而不能让模型直接修改数据库。
+    """
+
+    user_name: str | None = None
+    order_id: str | None = None
+    problem_type: ProblemType | None = None
+    description: str | None = None
+
+
+class AgentRunResponse(BaseModel):
+    """一次 Agent 执行的稳定响应契约。"""
+
+    session_id: str
+    reply: str
+    action: AgentAction
+    session_status: SessionStatus
+    missing_fields: list[str]
+    requires_human: bool
+    order: OrderResponse | None = None

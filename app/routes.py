@@ -45,7 +45,13 @@ from app.database import (
     list_messages_by_session,
     update_session as update_session_record,
 )
+from app.agent_service import (
+    AgentSessionNotFoundError,
+    run_agent,
+)
 from app.schemas import (
+    AgentRunRequest,
+    AgentRunResponse,
     ErrorResponse,
     HealthResponse,
     MessageCreate,
@@ -379,3 +385,42 @@ def read_messages(
         MessageResponse.model_validate(message)
         for message in messages
     ]
+
+
+# ==================== Agent 工作流新增 ====================
+
+
+@router.post(
+    "/sessions/{session_id}/runs",
+    response_model=AgentRunResponse,
+    tags=["agent"],
+    responses={
+        404: {"model": ErrorResponse},
+        503: {"model": ErrorResponse},
+    },
+)
+def run_customer_service_agent(
+    session_id: Annotated[
+        str,
+        Path(min_length=1, max_length=64),
+    ],
+    payload: AgentRunRequest,
+    db_path: Annotated[
+        FilePath,
+        Depends(get_database_path),
+    ],
+) -> AgentRunResponse:
+    """执行一轮带状态的售后客服 Agent。"""
+    try:
+        return run_agent(
+            session_id=session_id,
+            message=payload.message,
+            db_path=db_path,
+        )
+    except AgentSessionNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"会话不存在：{session_id}",
+        ) from exc
+    except DatabaseOperationError as exc:
+        raise database_unavailable(exc) from exc
