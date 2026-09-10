@@ -40,3 +40,6 @@ DEEPSEEK_MODEL = os.getenv(
 DEEPSEEK_TIMEOUT_SECONDS = float(
     os.getenv("DEEPSEEK_TIMEOUT_SECONDS", "20")
 )
+
+# 只用于演示人工客服接口的最小权限边界。未配置时，状态更新接口不可用。
+ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "").strip()

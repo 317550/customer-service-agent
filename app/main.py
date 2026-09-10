@@ -12,6 +12,7 @@ from pathlib import Path
 from fastapi import FastAPI
 
 from app.config import (
+    ADMIN_API_KEY,
     DATABASE_PATH,
     DEEPSEEK_API_KEY,
     DEEPSEEK_BASE_URL,
@@ -36,6 +37,7 @@ logging.basicConfig(
 def create_app(
     database_path: Path | None = None,
     information_extractor: InformationExtractor | None = None,
+    admin_api_key: str | None = None,
 ) -> FastAPI:
     """
     应用工厂。
@@ -63,7 +65,7 @@ def create_app(
 
     application = FastAPI(
         title="Customer Service Agent API",
-        version="0.1.0",
+        version="0.2.0",
         lifespan=lifespan,
     )
 
@@ -71,6 +73,10 @@ def create_app(
     # 将提取器放入应用状态，路由通过依赖注入获取。
     # 测试可以注入假实现，因此不会调用真实付费 API。
     application.state.information_extractor = runtime_information_extractor
+    # 参数为 None 才读取环境变量；测试可以显式注入固定密钥。
+    application.state.admin_api_key = (
+        ADMIN_API_KEY if admin_api_key is None else admin_api_key
+    )
     application.include_router(router)
 
     return application

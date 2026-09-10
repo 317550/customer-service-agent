@@ -25,11 +25,13 @@ create_session_record
 原函数本身没有被改名。
 """
 from pathlib import Path as FilePath
+import secrets
 from typing import Annotated, Any
 
 from fastapi import (
     APIRouter,
     Depends,
+    Header,
     HTTPException,
     Path,
     Request,
@@ -41,6 +43,8 @@ from app.database import (
     create_session as create_session_record,
     get_order_by_id,
     get_session_by_id,
+    get_ticket_by_id,
+    get_ticket_by_session_id,
     insert_message,
     list_messages_by_session,
     update_session as update_session_record,
@@ -61,12 +65,19 @@ from app.schemas import (
     SessionCreate,
     SessionResponse,
     SessionUpdate,
+    TicketResponse,
+    TicketStatusUpdate,
 )
 from app.services import (
     build_session_response,
     determine_session_status,
     normalize_optional_text,
     normalize_session_updates,
+)
+from app.ticket_service import (
+    InvalidTicketTransitionError,
+    TicketNotFoundError,
+    transition_ticket,
 )
 
 
@@ -88,6 +99,30 @@ def get_information_extractor(
 ) -> InformationExtractor:
     """从应用状态获取当前环境配置的信息提取器。"""
     return request.app.state.information_extractor
+
+
+def require_admin_token(
+    request: Request,
+    x_admin_token: Annotated[
+        str | None,
+        Header(alias="X-Admin-Token"),
+    ] = None,
+) -> None:
+    """保护人工客服接口，避免普通用户直接批准自己的工单。"""
+    configured_token = request.app.state.admin_api_key
+    if not configured_token:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="人工工单管理接口尚未配置",
+        )
+    if x_admin_token is None or not secrets.compare_digest(
+        x_admin_token,
+        configured_token,
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="无权执行人工工单操作",
+        )
 
 
 def database_unavailable(
@@ -437,3 +472,89 @@ def run_customer_service_agent(
         ) from exc
     except DatabaseOperationError as exc:
         raise database_unavailable(exc) from exc
+
+
+# ==================== 人工工单闭环 ====================
+
+
+@router.get(
+    "/sessions/{session_id}/ticket",
+    response_model=TicketResponse,
+    tags=["tickets"],
+    responses={404: {"model": ErrorResponse}, 503: {"model": ErrorResponse}},
+)
+def read_session_ticket(
+    session_id: Annotated[str, Path(min_length=1, max_length=64)],
+    db_path: Annotated[FilePath, Depends(get_database_path)],
+) -> TicketResponse:
+    """用户通过难以猜测的会话 ID 查询本会话工单进度。"""
+    get_session_or_404(session_id, db_path)
+    try:
+        ticket = get_ticket_by_session_id(session_id, db_path)
+    except DatabaseOperationError as exc:
+        raise database_unavailable(exc) from exc
+    if ticket is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"该会话尚未创建工单：{session_id}",
+        )
+    return TicketResponse.model_validate(ticket)
+
+
+@router.get(
+    "/tickets/{ticket_id}",
+    response_model=TicketResponse,
+    tags=["tickets"],
+    dependencies=[Depends(require_admin_token)],
+    responses={401: {"model": ErrorResponse}, 404: {"model": ErrorResponse}},
+)
+def read_ticket(
+    ticket_id: Annotated[int, Path(ge=1)],
+    db_path: Annotated[FilePath, Depends(get_database_path)],
+) -> TicketResponse:
+    """人工客服根据工单编号查看详情。"""
+    try:
+        ticket = get_ticket_by_id(ticket_id, db_path)
+    except DatabaseOperationError as exc:
+        raise database_unavailable(exc) from exc
+    if ticket is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"工单不存在：{ticket_id}",
+        )
+    return TicketResponse.model_validate(ticket)
+
+
+@router.patch(
+    "/tickets/{ticket_id}/status",
+    response_model=TicketResponse,
+    tags=["tickets"],
+    dependencies=[Depends(require_admin_token)],
+    responses={
+        401: {"model": ErrorResponse},
+        404: {"model": ErrorResponse},
+        409: {"model": ErrorResponse},
+        503: {"model": ErrorResponse},
+    },
+)
+def patch_ticket_status(
+    ticket_id: Annotated[int, Path(ge=1)],
+    payload: TicketStatusUpdate,
+    db_path: Annotated[FilePath, Depends(get_database_path)],
+) -> TicketResponse:
+    """人工审核工单；领域服务会拒绝越级或终态修改。"""
+    try:
+        ticket = transition_ticket(ticket_id, payload.status, db_path)
+    except TicketNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"工单不存在：{ticket_id}",
+        ) from exc
+    except InvalidTicketTransitionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+    except DatabaseOperationError as exc:
+        raise database_unavailable(exc) from exc
+    return TicketResponse.model_validate(ticket)

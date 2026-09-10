@@ -129,12 +129,30 @@ def init_db(db_path: str | Path) -> None:
                     description TEXT NOT NULL,
                     status TEXT NOT NULL,
                     created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
                     FOREIGN KEY (session_id)
                         REFERENCES sessions(session_id)
                         ON DELETE CASCADE
                 );
                 """
             )
+
+            # 兼容已经运行过旧版本的本地数据库。CREATE TABLE IF NOT
+            # EXISTS 不会给旧表补列，因此这里执行一次轻量迁移。
+            ticket_columns = {
+                row["name"]
+                for row in connection.execute(
+                    "PRAGMA table_info(tickets)"
+                ).fetchall()
+            }
+            if "updated_at" not in ticket_columns:
+                connection.execute(
+                    "ALTER TABLE tickets ADD COLUMN updated_at TEXT"
+                )
+                connection.execute(
+                    "UPDATE tickets SET updated_at = created_at "
+                    "WHERE updated_at IS NULL"
+                )
             connection.commit()
 
     except (sqlite3.Error, OSError) as exc:
@@ -477,3 +495,149 @@ def list_messages_by_session(
         raise DatabaseOperationError("查询会话消息失败") from exc
 
     return [dict(row) for row in rows]
+
+
+def get_or_create_ticket(
+    session_id: str,
+    order_id: str,
+    problem_type: str,
+    description: str,
+    db_path: str | Path,
+) -> dict[str, Any]:
+    """为会话幂等创建工单；重复执行同一会话不会产生重复工单。"""
+    now = utc_now()
+
+    try:
+        with open_database(db_path) as connection:
+            connection.execute(
+                """
+                INSERT INTO tickets (
+                    session_id,
+                    order_id,
+                    problem_type,
+                    description,
+                    status,
+                    created_at,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(session_id) DO NOTHING
+                """,
+                (
+                    session_id,
+                    order_id,
+                    problem_type,
+                    description,
+                    "pending_review",
+                    now,
+                    now,
+                ),
+            )
+            row = connection.execute(
+                """
+                SELECT ticket_id, session_id, order_id, problem_type,
+                       description, status, created_at, updated_at
+                FROM tickets
+                WHERE session_id = ?
+                """,
+                (session_id,),
+            ).fetchone()
+            connection.commit()
+    except sqlite3.Error as exc:
+        logger.exception("创建工单失败，session_id=%s", session_id)
+        raise DatabaseOperationError("创建工单失败") from exc
+
+    # sessions.session_id 是外键且当前会话已存在，正常情况下必有结果。
+    if row is None:
+        raise DatabaseOperationError("创建工单后未能读取工单")
+    return dict(row)
+
+
+def get_ticket_by_id(
+    ticket_id: int,
+    db_path: str | Path,
+) -> dict[str, Any] | None:
+    """根据公开工单编号查询工单。"""
+    try:
+        with open_database(db_path) as connection:
+            row = connection.execute(
+                """
+                SELECT ticket_id, session_id, order_id, problem_type,
+                       description, status, created_at, updated_at
+                FROM tickets
+                WHERE ticket_id = ?
+                """,
+                (ticket_id,),
+            ).fetchone()
+    except sqlite3.Error as exc:
+        logger.exception("查询工单失败，ticket_id=%s", ticket_id)
+        raise DatabaseOperationError("查询工单失败") from exc
+    return dict(row) if row is not None else None
+
+
+def get_ticket_by_session_id(
+    session_id: str,
+    db_path: str | Path,
+) -> dict[str, Any] | None:
+    """查询某个会话产生的工单。"""
+    try:
+        with open_database(db_path) as connection:
+            row = connection.execute(
+                """
+                SELECT ticket_id, session_id, order_id, problem_type,
+                       description, status, created_at, updated_at
+                FROM tickets
+                WHERE session_id = ?
+                """,
+                (session_id,),
+            ).fetchone()
+    except sqlite3.Error as exc:
+        logger.exception("查询会话工单失败，session_id=%s", session_id)
+        raise DatabaseOperationError("查询工单失败") from exc
+    return dict(row) if row is not None else None
+
+
+def set_ticket_status(
+    ticket_id: int,
+    new_status: str,
+    db_path: str | Path,
+    session_status: str | None = None,
+) -> dict[str, Any] | None:
+    """在同一事务中更新工单，并可同步更新所属会话状态。"""
+    try:
+        with open_database(db_path) as connection:
+            cursor = connection.execute(
+                """
+                UPDATE tickets
+                SET status = ?, updated_at = ?
+                WHERE ticket_id = ?
+                """,
+                (new_status, utc_now(), ticket_id),
+            )
+            if cursor.rowcount == 0:
+                return None
+            if session_status is not None:
+                connection.execute(
+                    """
+                    UPDATE sessions
+                    SET status = ?, updated_at = ?
+                    WHERE session_id = (
+                        SELECT session_id FROM tickets WHERE ticket_id = ?
+                    )
+                    """,
+                    (session_status, utc_now(), ticket_id),
+                )
+            row = connection.execute(
+                """
+                SELECT ticket_id, session_id, order_id, problem_type,
+                       description, status, created_at, updated_at
+                FROM tickets
+                WHERE ticket_id = ?
+                """,
+                (ticket_id,),
+            ).fetchone()
+            connection.commit()
+    except sqlite3.Error as exc:
+        logger.exception("更新工单失败，ticket_id=%s", ticket_id)
+        raise DatabaseOperationError("更新工单失败") from exc
+    return dict(row) if row is not None else None
