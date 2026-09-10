@@ -9,13 +9,19 @@ from app.database import (
     DatabaseOperationError,
     insert_order,
 )
+from app.extraction import RuleBasedInformationExtractor
 from app.main import create_app
 
 
 @pytest.fixture
 def client(tmp_path) -> Iterator[TestClient]:
     database_path = tmp_path / "test_agent.db"
-    test_app = create_app(database_path)
+    # 明确注入规则提取器，保证测试不会读取本地 .env，
+    # 也不会调用真实 DeepSeek API 或产生费用。
+    test_app = create_app(
+        database_path,
+        information_extractor=RuleBasedInformationExtractor(),
+    )
 
     with TestClient(test_app) as test_client:
         insert_order(
@@ -238,5 +244,4 @@ def test_agent_database_failure_returns_503(
     assert response.json() == {
         "detail": "服务暂时不可用"
     }
-
 
